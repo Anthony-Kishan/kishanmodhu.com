@@ -1,0 +1,47 @@
+# ============================================================================
+# Front controller, caching and security headers.
+# ============================================================================
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Uploaded media is data, never code. This lives here rather than only in
+    # assets/uploads/.htaccess so the protection holds even when that directory
+    # is created at runtime by the uploader.
+    RewriteRule ^assets/uploads/.*\.(php|phar|phtml|php[0-9]|pl|py|cgi|sh)$ - [F,L]
+
+    # Send everything that is not a real file or directory to index.php.
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^ index.php [L]
+</IfModule>
+
+# Never serve the environment file or version control metadata.
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
+
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set Permissions-Policy "geolocation=(), microphone=(), camera=()"
+
+    # Hashed asset URLs (?v=mtime) mean these can be cached hard.
+    <FilesMatch "\.(css|js|jpg|jpeg|png|gif|webp|svg|woff2?|pdf)$">
+        Header set Cache-Control "public, max-age=31536000, immutable"
+    </FilesMatch>
+</IfModule>
+
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/html text/css text/plain text/xml
+    AddOutputFilterByType DEFLATE application/javascript application/json
+    AddOutputFilterByType DEFLATE image/svg+xml
+</IfModule>
+
+<IfModule mod_mime.c>
+    AddType image/webp .webp
+</IfModule>
+
+# Directory listings are never wanted.
+Options -Indexes

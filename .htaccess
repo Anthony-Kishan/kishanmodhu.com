@@ -1,0 +1,21 @@
+# ============================================================================
+# Root .htaccess — only needed on hosts where the document root cannot be
+# pointed at public/ (most shared cPanel accounts).
+#
+# If you CAN set the document root to <project>/public, delete this file: it is
+# safer to keep application code entirely outside the web root.
+# ============================================================================
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Refuse direct access to application internals.
+    RewriteRule ^(app|config|database|storage)/ - [F,L]
+    RewriteRule ^\.env - [F,L]
+
+    # Serve everything through public/.
+    RewriteCond %{REQUEST_URI} !^/public/
+    RewriteRule ^(.*)$ public/$1 [L]
+</IfModule>
+
+Options -Indexes

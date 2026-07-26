@@ -1,0 +1,20 @@
+# Environment
+.env
+
+# Runtime
+storage/logs/*
+!storage/logs/.gitkeep
+
+# Uploaded media — content, not source
+public/assets/uploads/*
+!public/assets/uploads/.htaccess
+
+# Deploy state file, written by the FTP action on the server
+.ftp-deploy-sync-state.json
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

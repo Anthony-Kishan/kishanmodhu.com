@@ -1,0 +1,138 @@
+name: Deploy
+
+# Pushes to main are linted and tested, then published to Hostinger over FTPS.
+# A failing check blocks the deploy — `deploy` needs `verify` to pass first.
+#
+# ── One-time setup ──────────────────────────────────────────────────────────
+# Repository → Settings → Secrets and variables → Actions
+#
+#   Secrets (encrypted, never printed):
+#     FTP_SERVER     ftp.your-domain.com   (hPanel → Files → FTP Accounts)
+#     FTP_USERNAME   u123456789.deploy
+#     FTP_PASSWORD   the FTP account password
+#
+#   Variables (plain text, safe to read):
+#     FTP_REMOTE_DIR  where to publish, with a trailing slash. See README.
+#                     Default below suits "everything inside public_html".
+#     HEALTHCHECK_URL optional; e.g. https://kishanmodhu.com/ — checked after deploy
+#
+# ── Never deployed ──────────────────────────────────────────────────────────
+# .env stays on the server and is never overwritten. public/assets/uploads/ is
+# excluded so a deploy cannot delete media uploaded through the CMS. Neither
+# database/ nor tests/ belong on a web host.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Deploy without running tests (emergency only)'
+        type: boolean
+        default: false
+
+# One deploy at a time. A newer push waits rather than interleaving uploads.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Lint & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Match the PHP version configured in hPanel → Advanced → PHP Configuration.
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo_mysql, mbstring, fileinfo, gd
+          coverage: none
+
+      - name: Lint every PHP file
+        run: |
+          find app config database public tests -name '*.php' -print0 \
+            | xargs -0 -n1 -P4 php -l
+
+      - name: Run test suite
+        if: ${{ !inputs.skip_tests }}
+        run: php tests/run.php
+
+      # Catches a stray .env or a credential pasted into tracked source.
+      - name: Check for committed secrets
+        run: |
+          if git ls-files | grep -qxF '.env'; then
+            echo "::error::.env is tracked by git. Remove it: git rm --cached .env"
+            exit 1
+          fi
+          if git grep -nEi 'DB_PASSWORD[[:space:]]*=[[:space:]]*[^[:space:]]+' -- ':!.env.example' ':!.github'; then
+            echo "::error::A database password looks hard-coded in tracked source."
+            exit 1
+          fi
+
+  deploy:
+    name: Publish to Hostinger
+    runs-on: ubuntu-latest
+    needs: verify
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail fast on missing configuration
+        env:
+          SERVER: ${{ secrets.FTP_SERVER }}
+          USERNAME: ${{ secrets.FTP_USERNAME }}
+          PASSWORD: ${{ secrets.FTP_PASSWORD }}
+        run: |
+          missing=""
+          [ -z "$SERVER" ]   && missing="$missing FTP_SERVER"
+          [ -z "$USERNAME" ] && missing="$missing FTP_USERNAME"
+          [ -z "$PASSWORD" ] && missing="$missing FTP_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secret(s):$missing"
+            exit 1
+          fi
+
+      - name: Upload over FTPS
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftps
+          server-dir: ${{ vars.FTP_REMOTE_DIR || 'public_html/' }}
+          # Only files that changed since the last run are transferred; the
+          # action keeps its own state file on the server to work that out.
+          state-name: .ftp-deploy-sync-state.json
+          # Anything matched here is neither uploaded nor deleted remotely.
+          exclude: |
+            **/.git*
+            **/.git*/**
+            **/.github/**
+            **/tests/**
+            **/database/**
+            **/node_modules/**
+            **/.env
+            **/.env.example
+            **/*.md
+            **/storage/logs/*.log
+            **/public/assets/uploads/**
+            **/.DS_Store
+
+      - name: Verify the site responds
+        if: ${{ vars.HEALTHCHECK_URL != '' }}
+        run: |
+          url="${{ vars.HEALTHCHECK_URL }}"
+          for attempt in 1 2 3; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$url" || echo 000)
+            echo "attempt $attempt: HTTP $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 10
+          done
+          echo "::error::$url did not return 200 after the deploy."
+          exit 1
