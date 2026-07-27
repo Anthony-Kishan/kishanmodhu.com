@@ -6,14 +6,16 @@ name: Deploy
 # ── One-time setup ──────────────────────────────────────────────────────────
 # Repository → Settings → Secrets and variables → Actions
 #
-#   Secrets (encrypted, never printed):
+#   Secrets (encrypted, never printed) — all three are required:
 #     FTP_SERVER     ftp.your-domain.com   (hPanel → Files → FTP Accounts)
-#     FTP_USERNAME   u123456789.deploy
+#     FTP_USERNAME   u123456789.deploy     (an FTP account, NOT your hPanel login)
 #     FTP_PASSWORD   the FTP account password
 #
-#   Variables (plain text, safe to read):
-#     FTP_REMOTE_DIR  where to publish, with a trailing slash. See README.
-#                     Default below suits "everything inside public_html".
+#   Optional, accepted as either a Variable or a Secret:
+#     FTP_REMOTE_DIR  where to publish, with a trailing slash (default public_html/)
+#     FTP_PROTOCOL    'ftps' (default) or 'ftp' if the host has no working TLS
+#
+#   Variables only:
 #     HEALTHCHECK_URL optional; e.g. https://kishanmodhu.com/ — checked after deploy
 #
 # ── Never deployed ──────────────────────────────────────────────────────────
@@ -110,6 +112,7 @@ jobs:
           SERVER: ${{ secrets.FTP_SERVER }}
           USERNAME: ${{ secrets.FTP_USERNAME }}
           PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          REMOTE_DIR: ${{ vars.FTP_REMOTE_DIR || secrets.FTP_REMOTE_DIR }}
         run: |
           fail=0
 
@@ -175,6 +178,12 @@ jobs:
           fi
 
           echo "Resolves to: $(getent hosts "$SERVER" | awk '{print $1}' | sort -u | paste -sd' ')"
+          echo "Publishing to: ${REMOTE_DIR:-public_html/}"
+
+          case "${REMOTE_DIR:-public_html/}" in
+            */) : ;;
+            *) echo "::warning::FTP_REMOTE_DIR has no trailing slash; the action expects one." ;;
+          esac
 
       # Proves the credentials work before the upload action runs, and separates
       # an authentication failure from a TLS or connectivity one.
@@ -225,8 +234,8 @@ jobs:
           server: ${{ secrets.FTP_SERVER }}
           username: ${{ secrets.FTP_USERNAME }}
           password: ${{ secrets.FTP_PASSWORD }}
-          protocol: ${{ vars.FTP_PROTOCOL || 'ftps' }}
-          server-dir: ${{ vars.FTP_REMOTE_DIR || 'public_html/' }}
+          protocol: ${{ vars.FTP_PROTOCOL || secrets.FTP_PROTOCOL || 'ftps' }}
+          server-dir: ${{ vars.FTP_REMOTE_DIR || secrets.FTP_REMOTE_DIR || 'public_html/' }}
           # Only files that changed since the last run are transferred; the
           # action keeps its own state file on the server to work that out.
           state-name: .ftp-deploy-sync-state.json
