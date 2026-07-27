@@ -44,7 +44,7 @@ jobs:
     name: Lint & test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Match the PHP version configured in hPanel → Advanced → PHP Configuration.
       - name: Set up PHP
@@ -64,15 +64,34 @@ jobs:
         run: php tests/run.php
 
       # Catches a stray .env or a credential pasted into tracked source.
+      # Note: git grep only sees tracked files, which is what we want here —
+      # the question is what has been committed, not what is on disk.
       - name: Check for committed secrets
         run: |
           if git ls-files | grep -qxF '.env'; then
             echo "::error::.env is tracked by git. Remove it: git rm --cached .env"
             exit 1
           fi
-          if git grep -nEi 'DB_PASSWORD[[:space:]]*=[[:space:]]*[^[:space:]]+' -- ':!.env.example' ':!.github'; then
-            echo "::error::A database password looks hard-coded in tracked source."
-            exit 1
+
+          # Documentation legitimately shows "DB_PASSWORD=your-db-password" and
+          # the like, so obvious placeholders are filtered out rather than the
+          # whole file being skipped — a real password pasted into the README
+          # should still fail the build.
+          hits=$(git grep -nEi 'DB_PASSWORD[[:space:]]*=[[:space:]]*[^[:space:]]+' \
+                   -- ':!.env.example' ':!.github' || true)
+
+          if [ -n "$hits" ]; then
+            real=$(printf '%s\n' "$hits" | grep -vEi \
+              '=[[:space:]]*(your[-_.]|my[-_.]|the[-_.]|change[-_.]?me|password[-_.]?here|secret[-_.]?here|placeholder|example|dummy|test|x{3,}|\*{3,}|<[^>]+>|\$\{|"?\$)' \
+              || true)
+
+            if [ -n "$real" ]; then
+              echo "$real"
+              echo "::error::A database password looks hard-coded in tracked source."
+              exit 1
+            fi
+
+            echo "Ignored $(printf '%s\n' "$hits" | wc -l) documented placeholder(s)."
           fi
 
   deploy:
@@ -81,7 +100,7 @@ jobs:
     needs: verify
     environment: production
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Fail fast on missing configuration
         env:
