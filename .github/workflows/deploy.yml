@@ -102,20 +102,122 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Fail fast on missing configuration
+      # Validates the shape of the credentials without printing them. A stray
+      # newline pasted into a secret is invisible in the GitHub UI and is a
+      # common cause of "530 Login incorrect".
+      - name: Preflight — inspect credentials
         env:
           SERVER: ${{ secrets.FTP_SERVER }}
           USERNAME: ${{ secrets.FTP_USERNAME }}
           PASSWORD: ${{ secrets.FTP_PASSWORD }}
         run: |
-          missing=""
-          [ -z "$SERVER" ]   && missing="$missing FTP_SERVER"
-          [ -z "$USERNAME" ] && missing="$missing FTP_USERNAME"
-          [ -z "$PASSWORD" ] && missing="$missing FTP_PASSWORD"
-          if [ -n "$missing" ]; then
-            echo "::error::Missing repository secret(s):$missing"
+          fail=0
+
+          for key in SERVER USERNAME PASSWORD; do
+            eval "value=\${$key}"
+            if [ -z "$value" ]; then
+              echo "::error::Secret FTP_${key} is not set."
+              fail=1
+            fi
+          done
+
+          if [ "$fail" -eq 1 ]; then
             exit 1
           fi
+
+          # A hostname or FTP username never contains whitespace, so any is an error.
+          for key in SERVER USERNAME; do
+            eval "value=\${$key}"
+            stripped=$(printf '%s' "$value" | tr -d '[:space:]')
+            if [ "${#value}" -ne "${#stripped}" ]; then
+              echo "::error::FTP_${key} contains a space, tab or newline. Re-paste it with no surrounding whitespace."
+              fail=1
+            fi
+          done
+
+          # A password may legitimately contain an internal space, so only
+          # surrounding whitespace and embedded newlines are rejected.
+          trimmed=$(printf '%s' "$PASSWORD" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          if [ "$PASSWORD" != "$trimmed" ]; then
+            echo "::error::FTP_PASSWORD has leading or trailing whitespace. Re-paste it without it."
+            fail=1
+          fi
+          if [ "$(printf '%s' "$PASSWORD" | wc -l)" -gt 0 ]; then
+            echo "::error::FTP_PASSWORD contains a newline. Re-paste it as a single line."
+            fail=1
+          fi
+
+          echo "FTP_SERVER   ${#SERVER} chars"
+          echo "FTP_USERNAME ${#USERNAME} chars"
+          echo "FTP_PASSWORD ${#PASSWORD} chars"
+
+          case "$SERVER" in
+            *://*)
+              echo "::error::FTP_SERVER must be a bare hostname or IP — drop the ftp:// prefix."
+              fail=1 ;;
+            */*)
+              echo "::error::FTP_SERVER must not include a path. Put the directory in the FTP_REMOTE_DIR variable."
+              fail=1 ;;
+          esac
+
+          case "$USERNAME" in
+            *@*)
+              echo "::warning::FTP_USERNAME looks like an email address. Hostinger FTP usernames look like u123456789 — it is not your hPanel login." ;;
+          esac
+
+          if [ "$fail" -eq 1 ]; then
+            exit 1
+          fi
+
+          if ! getent hosts "$SERVER" > /dev/null 2>&1; then
+            echo "::error::${SERVER} does not resolve. Use the host or IP shown in hPanel → Files → FTP Accounts."
+            exit 1
+          fi
+
+          echo "Resolves to: $(getent hosts "$SERVER" | awk '{print $1}' | sort -u | paste -sd' ')"
+
+      # Proves the credentials work before the upload action runs, and separates
+      # an authentication failure from a TLS or connectivity one.
+      - name: Preflight — test login
+        env:
+          SERVER: ${{ secrets.FTP_SERVER }}
+          USERNAME: ${{ secrets.FTP_USERNAME }}
+          PASSWORD: ${{ secrets.FTP_PASSWORD }}
+        run: |
+          umask 077
+          netrc="${RUNNER_TEMP}/ftp-netrc"
+          printf 'machine %s login %s password %s\n' "$SERVER" "$USERNAME" "$PASSWORD" > "$netrc"
+          trap 'rm -f "$netrc"' EXIT
+
+          probe() {
+            curl -sS --connect-timeout 20 --max-time 60 \
+                 --netrc-file "$netrc" $1 --list-only "ftp://${SERVER}/" 2>&1
+          }
+
+          if secure=$(probe --ssl-reqd); then
+            echo "FTPS login succeeded. Remote root contains:"
+            printf '%s\n' "$secure" | head -20
+            exit 0
+          fi
+
+          echo "FTPS attempt failed:"
+          printf '%s\n' "$secure"
+
+          if plain=$(probe ''); then
+            echo "::error::Plain FTP works but FTPS does not. Set the repository variable FTP_PROTOCOL to 'ftp', or enable FTPS on the hosting account."
+            exit 1
+          fi
+
+          case "$secure$plain" in
+            *530*)
+              echo "::error::530 Login incorrect — the server rejected this username/password pair. Check FTP_USERNAME and FTP_PASSWORD against hPanel → Files → FTP Accounts (an FTP account, not your hPanel login), and re-paste with no trailing spaces." ;;
+            *timed\ out*|*Timeout*)
+              echo "::error::Connection timed out. Confirm FTP_SERVER and that the host is not blocking the runner." ;;
+            *)
+              echo "::error::Could not establish an FTP session. Output above." ;;
+          esac
+
+          exit 1
 
       - name: Upload over FTPS
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
@@ -123,7 +225,7 @@ jobs:
           server: ${{ secrets.FTP_SERVER }}
           username: ${{ secrets.FTP_USERNAME }}
           password: ${{ secrets.FTP_PASSWORD }}
-          protocol: ftps
+          protocol: ${{ vars.FTP_PROTOCOL || 'ftps' }}
           server-dir: ${{ vars.FTP_REMOTE_DIR || 'public_html/' }}
           # Only files that changed since the last run are transferred; the
           # action keeps its own state file on the server to work that out.

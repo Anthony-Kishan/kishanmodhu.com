@@ -203,6 +203,41 @@ The uploads directory is created automatically on first upload, and PHP
 execution inside it is blocked by a rule in
 [`public/.htaccess`](public/.htaccess).
 
+### Troubleshooting the deploy
+
+The `deploy` job runs two preflight steps before uploading anything, so most
+misconfiguration is reported in plain language rather than as an FTP error.
+
+**`FTPError: 530 Login incorrect`** — the server rejected the username and
+password. In order of likelihood:
+
+1. **Wrong account type.** `FTP_USERNAME` and `FTP_PASSWORD` must come from
+   hPanel → Files → **FTP Accounts**, not your Hostinger account login. The
+   username looks like `u123456789` or `u123456789.deploy`, never an email
+   address.
+2. **Whitespace in a secret.** A trailing space or newline picked up while
+   copying is invisible in the GitHub secrets UI. The preflight now catches
+   this — re-paste the value and save.
+3. **Password never set.** A freshly created FTP account may have no usable
+   password until you set one explicitly. Use *Change FTP password* in hPanel,
+   then update the secret.
+4. **Wrong host.** `FTP_SERVER` must be the hostname or IP from the FTP
+   Accounts page. If your domain does not yet point at Hostinger,
+   `ftp.your-domain.com` resolves somewhere else entirely — use the IP instead.
+5. **Propagation.** A newly created FTP account can take a few minutes to work.
+
+**`FTPS` fails but plain FTP works** — the preflight says so explicitly. Set the
+repository variable `FTP_PROTOCOL` to `ftp`. Prefer fixing FTPS if you can:
+plain FTP sends the password unencrypted.
+
+**Deploy succeeds but the site 500s** — check `storage/logs/php-error.log` on
+the server. Usually a missing or wrong `.env`, or a schema change that has not
+been applied yet.
+
+**Deploy succeeds but nothing changed** — the action keeps
+`.ftp-deploy-sync-state.json` on the server to track what it has already sent.
+Delete it to force a full re-upload.
+
 ### Schema changes
 
 There is no migration runner. If you add a table or column, apply it to the
