@@ -172,12 +172,30 @@ jobs:
             exit 1
           fi
 
-          if ! getent hosts "$SERVER" > /dev/null 2>&1; then
-            echo "::error::${SERVER} does not resolve. Use the host or IP shown in hPanel → Files → FTP Accounts."
+          # An IP literal needs no lookup at all. Note that `getent hosts <ip>`
+          # would do a *reverse* lookup and report failure for any address
+          # without a PTR record — which most hosting IPs lack.
+          case "$SERVER" in
+            *[!0-9.]*)
+              is_literal=0 ;;
+            *.*.*.*)
+              is_literal=1 ;;
+            *)
+              is_literal=0 ;;
+          esac
+
+          case "$SERVER" in
+            *:*) is_literal=1 ;;
+          esac
+
+          if [ "$is_literal" -eq 1 ]; then
+            echo "FTP_SERVER is an IP literal; no DNS lookup needed."
+          elif getent ahosts "$SERVER" > /dev/null 2>&1; then
+            echo "FTP_SERVER resolves to: $(getent ahosts "$SERVER" | awk '{print $1}' | sort -u | paste -sd' ')"
+          else
+            echo "::error::FTP_SERVER does not resolve. Use the host or IP shown in hPanel → Files → FTP Accounts. (The value is masked in this log; check it in repository settings.)"
             exit 1
           fi
-
-          echo "Resolves to: $(getent hosts "$SERVER" | awk '{print $1}' | sort -u | paste -sd' ')"
           echo "Publishing to: ${REMOTE_DIR:-public_html/}"
 
           case "${REMOTE_DIR:-public_html/}" in
