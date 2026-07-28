@@ -301,6 +301,52 @@ jobs:
             **/public/assets/uploads/**
             **/.DS_Store
 
+      # Proves where the files actually landed. An FTP account that is chrooted
+      # into the web root will already be "inside" public_html, in which case a
+      # server-dir of public_html/ silently nests them one level too deep.
+      - name: Confirm the upload landed
+        env:
+          SERVER: ${{ secrets.FTP_SERVER }}
+          USERNAME: ${{ secrets.FTP_USERNAME }}
+          PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          REMOTE_DIR: ${{ vars.FTP_REMOTE_DIR || secrets.FTP_REMOTE_DIR || 'public_html/' }}
+        run: |
+          umask 077
+          netrc="${RUNNER_TEMP}/ftp-netrc"
+          printf 'machine %s login %s password %s\n' "$SERVER" "$USERNAME" "$PASSWORD" > "$netrc"
+          trap 'rm -f "$netrc"' EXIT
+
+          list() {
+            curl -sS --connect-timeout 20 --max-time 60 --netrc-file "$netrc" \
+                 --ssl-reqd --insecure --list-only "ftp://${SERVER}/${1}" 2>/dev/null || true
+          }
+
+          target="${REMOTE_DIR%/}/"
+
+          echo "── FTP login directory (/) ──"
+          root=$(list '')
+          printf '%s\n' "$root" | sed 's/^/  /'
+
+          echo
+          echo "── Deploy target (${target}) ──"
+          landed=$(list "$target")
+          printf '%s\n' "$landed" | sed 's/^/  /'
+
+          echo
+          if printf '%s\n' "$landed" | grep -qx 'index.php'; then
+            echo "index.php is present in ${target} — the upload landed correctly."
+          elif printf '%s\n' "$root" | grep -qx 'index.php'; then
+            echo "::error::index.php is in the FTP login directory, not ${target}. This account is already chrooted to the web root — set FTP_REMOTE_DIR to './' (or delete it) so files are not nested."
+            exit 1
+          else
+            echo "::warning::index.php was not found in ${target} or in the login directory. Compare the two listings above and set FTP_REMOTE_DIR to the directory your domain actually serves."
+          fi
+
+          if printf '%s\n' "$landed" | grep -qx 'public'; then
+            echo "The application's public/ directory is present."
+            echo "Point the domain's document root at ${target}public — or rely on the root .htaccess to rewrite into it."
+          fi
+
       - name: Verify the site responds
         if: ${{ vars.HEALTHCHECK_URL != '' }}
         run: |
