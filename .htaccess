@@ -10,12 +10,25 @@
     RewriteEngine On
 
     # Refuse direct access to application internals.
-    RewriteRule ^(app|config|database|storage)/ - [F,L]
-    RewriteRule ^\.env - [F,L]
+    #
+    # This list covers everything a deploy might place beside public/ — note
+    # that Hostinger's Git integration copies the whole repository, including
+    # .git/, whereas the GitHub Actions job uploads a filtered subset. Blocking
+    # here means the site is safe under either method.
+    RewriteRule ^(app|config|database|storage|tests|node_modules)/ - [F,L]
+    RewriteRule ^\.(git|github|env|htaccess) - [F,L]
+    RewriteRule ^(composer\.(json|lock)|package(-lock)?\.json|README\.md|\.env\..*)$ - [F,L]
 
     # Serve everything through public/.
     RewriteCond %{REQUEST_URI} !^/public/
     RewriteRule ^(.*)$ public/$1 [L]
+</IfModule>
+
+# Second line of defence for hosts where mod_rewrite is unavailable.
+<IfModule mod_authz_core.c>
+    <FilesMatch "^\.">
+        Require all denied
+    </FilesMatch>
 </IfModule>
 
 Options -Indexes
