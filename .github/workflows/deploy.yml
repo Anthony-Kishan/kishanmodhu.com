@@ -316,35 +316,64 @@ jobs:
           printf 'machine %s login %s password %s\n' "$SERVER" "$USERNAME" "$PASSWORD" > "$netrc"
           trap 'rm -f "$netrc"' EXIT
 
+          # Distinguishes "directory is empty" from "directory does not exist",
+          # which a suppressed curl error would hide.
           list() {
             curl -sS --connect-timeout 20 --max-time 60 --netrc-file "$netrc" \
-                 --ssl-reqd --insecure --list-only "ftp://${SERVER}/${1}" 2>/dev/null || true
+                 --ssl-reqd --insecure --list-only "ftp://${SERVER}/${1}" 2>&1
+          }
+
+          show() {
+            if body=$(list "$1"); then
+              if [ -z "$body" ]; then
+                echo "  (exists, empty)"
+              else
+                printf '%s\n' "$body" | grep -vx '\.\.\?' | sed 's/^/  /'
+              fi
+              return 0
+            fi
+            echo "  (does not exist)"
+            return 1
           }
 
           target="${REMOTE_DIR%/}/"
 
           echo "── FTP login directory (/) ──"
-          root=$(list '')
-          printf '%s\n' "$root" | sed 's/^/  /'
+          root=$(list '' || true)
+          printf '%s\n' "$root" | grep -vx '\.\.\?' | sed 's/^/  /'
 
           echo
           echo "── Deploy target (${target}) ──"
-          landed=$(list "$target")
-          printf '%s\n' "$landed" | sed 's/^/  /'
+          show "$target" || true
 
+          # Hostinger serves each domain from domains/<domain>/public_html.
           echo
-          if printf '%s\n' "$landed" | grep -qx 'index.php'; then
-            echo "index.php is present in ${target} — the upload landed correctly."
-          elif printf '%s\n' "$root" | grep -qx 'index.php'; then
-            echo "::error::index.php is in the FTP login directory, not ${target}. This account is already chrooted to the web root — set FTP_REMOTE_DIR to './' (or delete it) so files are not nested."
-            exit 1
-          else
-            echo "::warning::index.php was not found in ${target} or in the login directory. Compare the two listings above and set FTP_REMOTE_DIR to the directory your domain actually serves."
+          echo "── Looking for the real web root ──"
+          suggestion=""
+
+          if domains=$(list 'domains/'); then
+            for d in $(printf '%s\n' "$domains" | grep -vx '\.\.\?'); do
+              echo "domains/${d}/"
+              show "domains/${d}/"
+              if [ -z "$suggestion" ]; then
+                suggestion="domains/${d}/public_html/"
+              fi
+            done
           fi
 
-          if printf '%s\n' "$landed" | grep -qx 'public'; then
-            echo "The application's public/ directory is present."
-            echo "Point the domain's document root at ${target}public — or rely on the root .htaccess to rewrite into it."
+          echo
+          if printf '%s\n' "$root" | grep -qx 'index.php'; then
+            echo "::error::The project uploaded into the FTP login directory, which is your account home — not a web root. Set the repository variable FTP_REMOTE_DIR to ${suggestion:-the directory your domain serves (see the listings above)} and redeploy."
+            echo "Afterwards, delete the stray app/ config/ public/ storage/ .htaccess entries from the account home."
+            exit 1
+          fi
+
+          landed=$(list "$target" || true)
+
+          if printf '%s\n' "$landed" | grep -qx 'index.php'; then
+            echo "index.php is present in ${target} — the upload landed correctly."
+          else
+            echo "::warning::index.php was not found in ${target}. Compare the listings above and set FTP_REMOTE_DIR to the directory your domain actually serves."
           fi
 
       - name: Verify the site responds
