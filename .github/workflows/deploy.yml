@@ -210,6 +210,7 @@ jobs:
           SERVER: ${{ secrets.FTP_SERVER }}
           USERNAME: ${{ secrets.FTP_USERNAME }}
           PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          PROTOCOL: ${{ vars.FTP_PROTOCOL || secrets.FTP_PROTOCOL || 'ftps' }}
         run: |
           umask 077
           netrc="${RUNNER_TEMP}/ftp-netrc"
@@ -221,23 +222,51 @@ jobs:
                  --netrc-file "$netrc" $1 --list-only "ftp://${SERVER}/" 2>&1
           }
 
-          if secure=$(probe --ssl-reqd); then
-            echo "FTPS login succeeded. Remote root contains:"
-            printf '%s\n' "$secure" | head -20
+          # Plain FTP explicitly requested — verify that and stop.
+          if [ "$PROTOCOL" = "ftp" ]; then
+            if listing=$(probe ''); then
+              echo "Plain FTP login succeeded. Remote root contains:"
+              printf '%s\n' "$listing" | head -20
+              echo "::warning::FTP_PROTOCOL is 'ftp', so the password crosses the network unencrypted. Prefer FTPS — see the deployment notes in README.md."
+              exit 0
+            fi
+            printf '%s\n' "$listing"
+            echo "::error::Plain FTP login failed. Check FTP_USERNAME and FTP_PASSWORD in hPanel → Files → FTP Accounts."
+            exit 1
+          fi
+
+          # Best case: FTPS with a fully valid certificate.
+          if listing=$(probe --ssl-reqd); then
+            echo "FTPS login succeeded with a valid certificate. Remote root contains:"
+            printf '%s\n' "$listing" | head -20
+            exit 0
+          fi
+          strict="$listing"
+
+          # Does TLS work at all, ignoring certificate identity? The upload
+          # action does not verify certificates, so this is the behaviour that
+          # actually matters — being stricter here would block a working deploy.
+          if listing=$(probe '--ssl-reqd --insecure'); then
+            echo "FTPS works, but the certificate does not match the host:"
+            printf '%s\n' "$strict" | head -5
+            echo
+            echo "::warning::Connecting by IP address cannot match the server's certificate. The transfer is still encrypted and the upload will proceed. To silence this, set FTP_SERVER to the FTP hostname from hPanel instead of the IP."
+            echo "Remote root contains:"
+            printf '%s\n' "$listing" | head -20
             exit 0
           fi
 
           echo "FTPS attempt failed:"
-          printf '%s\n' "$secure"
+          printf '%s\n' "$strict"
 
-          if plain=$(probe ''); then
-            echo "::error::Plain FTP works but FTPS does not. Set the repository variable FTP_PROTOCOL to 'ftp', or enable FTPS on the hosting account."
+          if listing=$(probe ''); then
+            echo "::error::TLS is unavailable on this server, but plain FTP works. Set the repository VARIABLE (not secret) FTP_PROTOCOL to 'ftp' to deploy without encryption."
             exit 1
           fi
 
-          case "$secure$plain" in
+          case "$strict$listing" in
             *530*)
-              echo "::error::530 Login incorrect — the server rejected this username/password pair. Check FTP_USERNAME and FTP_PASSWORD against hPanel → Files → FTP Accounts (an FTP account, not your hPanel login), and re-paste with no trailing spaces." ;;
+              echo "::error::530 Login incorrect — the server rejected this username/password pair. Check them against hPanel → Files → FTP Accounts (an FTP account, not your hPanel login)." ;;
             *timed\ out*|*Timeout*)
               echo "::error::Connection timed out. Confirm FTP_SERVER and that the host is not blocking the runner." ;;
             *)
