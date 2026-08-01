@@ -7,12 +7,17 @@ declare(strict_types=1);
  *
  * Usage:
  *   php database/create_admin.php "Full Name" you@example.com
+ *   php database/create_admin.php --sql "Full Name" you@example.com
  *
  * The password is prompted for and hidden as you type, so it never lands in
  * your shell history. For scripted setup, pass it through the environment
  * instead — also history-free:
  *
  *   ADMIN_PASSWORD='…' php database/create_admin.php "Full Name" you@example.com
+ *
+ * --sql prints an INSERT statement instead of touching a database, for hosts
+ * where you only have phpMyAdmin. The password is hashed locally, so the
+ * plaintext never leaves this machine.
  */
 
 if (PHP_SAPI !== 'cli') {
@@ -34,11 +39,18 @@ function fail(string $message): never
     exit(1);
 }
 
-$name  = $argv[1] ?? null;
-$email = $argv[2] ?? null;
+// --sql may appear anywhere; the remaining arguments are name and email.
+$sqlMode = in_array('--sql', $argv, true);
+$args    = array_values(array_filter(
+    array_slice($argv, 1),
+    static fn (string $a): bool => $a !== '--sql'
+));
+
+$name  = $args[0] ?? null;
+$email = $args[1] ?? null;
 
 if ($name === null || $email === null) {
-    fail("Usage: php database/create_admin.php \"Full Name\" you@example.com");
+    fail("Usage: php database/create_admin.php [--sql] \"Full Name\" you@example.com");
 }
 
 $name  = trim($name);
@@ -52,9 +64,9 @@ if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
     fail("'{$email}' is not a valid email address.");
 }
 
-$users = new User();
+$users = $sqlMode ? null : new User();
 
-if ($users->emailExists($email)) {
+if ($users !== null && $users->emailExists($email)) {
     fail("An account already exists for {$email}.");
 }
 
@@ -87,10 +99,11 @@ if (is_string($password) && $password !== '') {
     }
 
     if ($interactive) {
-        echo 'Creating an admin account for ' . $email . PHP_EOL;
-        echo $hidden
+        // Prompts go to stderr so that `--sql > file` captures only SQL.
+        fwrite(STDERR, 'Creating an admin account for ' . $email . PHP_EOL);
+        fwrite(STDERR, $hidden
             ? '(your password is hidden as you type — nothing will appear, that is expected)' . PHP_EOL
-            : 'WARNING: this terminal will show your password as you type.' . PHP_EOL;
+            : 'WARNING: this terminal will show your password as you type.' . PHP_EOL);
     }
 
     $password = prompt(sprintf('Password (at least %d characters): ', MIN_PASSWORD_LENGTH));
@@ -119,6 +132,27 @@ if ($password !== $confirm) {
 }
 
 // ── Create ──────────────────────────────────────────────────────────────────
+if ($sqlMode) {
+    // Hashed here so the plaintext password never leaves this machine.
+    $hash = password_hash($password, PASSWORD_DEFAULT);
+
+    // Escape backslashes first, then single quotes, so a name like O'Brien
+    // cannot break out of the literal.
+    $quote = static function (string $value): string {
+        return "'" . str_replace(['\\', "'"], ['\\\\', "\\'"], $value) . "'";
+    };
+
+    echo "-- Administrator account for {$email}\n";
+    echo "-- Import through phpMyAdmin after schema.sql.\n";
+    echo 'INSERT INTO `users` (`name`, `email`, `password`, `role`, `is_active`) VALUES ('
+        . $quote($name) . ', '
+        . $quote($email) . ', '
+        . $quote($hash) . ", 'admin', 1);\n";
+
+    fwrite(STDERR, "\nSQL written to stdout. Import it, then sign in at /admin/login\n");
+    exit(0);
+}
+
 $id = $users->create([
     'name'      => $name,
     'email'     => $email,
@@ -132,12 +166,15 @@ printf('Sign in at %s/admin/login%s', App\Core\Config::get('app.url'), PHP_EOL);
 
 /**
  * Read one line from stdin, without the trailing newline.
+ *
+ * The label is written to stderr, not stdout — a prompt is not program output,
+ * and in --sql mode stdout carries the SQL.
  */
 function prompt(string $label): string
 {
-    echo $label;
+    fwrite(STDERR, $label);
     $line = fgets(STDIN);
-    echo PHP_EOL;
+    fwrite(STDERR, PHP_EOL);
 
     return $line === false ? '' : trim($line);
 }

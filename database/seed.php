@@ -8,9 +8,17 @@ declare(strict_types=1);
  * Running this reproduces the pre-CMS page exactly, so the migration is
  * verifiable: seed, load the site, and nothing should have moved.
  *
- * Usage:  php database/seed.php [--fresh]
+ * Usage:
+ *   php database/seed.php [--fresh]     insert directly into the database
+ *   php database/seed.php --sql         print SQL to stdout instead
+ *
  *   --fresh  Empty the content tables first (settings, works, services, …).
  *            Admin accounts and contact messages are never touched.
+ *   --sql    Emit INSERT statements without connecting to any database, for
+ *            importing through phpMyAdmin. This is how you seed a shared host
+ *            where database/ is not deployed and there is no shell access:
+ *
+ *              php database/seed.php --sql > seed-data.sql
  */
 
 if (PHP_SAPI !== 'cli') {
@@ -22,19 +30,96 @@ require __DIR__ . '/../app/bootstrap.php';
 use App\Core\Database;
 use App\Models\Setting;
 
-$fresh = in_array('--fresh', $argv, true);
+$fresh   = in_array('--fresh', $argv, true);
+$sqlMode = in_array('--sql', $argv, true);
 
 $contentTables = [
     'settings', 'works', 'services', 'testimonials',
     'experiences', 'stacks', 'marquee_logos', 'certificates', 'social_links',
 ];
 
-if ($fresh) {
+/**
+ * Progress goes to stderr so that `--sql > file` captures only SQL.
+ */
+function report(string $message): void
+{
+    fwrite(STDERR, $message);
+}
+
+/**
+ * Column names for a table.
+ *
+ * In --sql mode these are parsed out of schema.sql, so the script needs no
+ * database connection at all.
+ *
+ * @return array<int, string>
+ */
+function tableColumns(string $table): array
+{
+    global $sqlMode;
+
+    if (!$sqlMode) {
+        return array_column(Database::select("SHOW COLUMNS FROM `{$table}`"), 'Field');
+    }
+
+    static $parsed = null;
+
+    if ($parsed === null) {
+        $parsed = [];
+        $schema = (string) file_get_contents(__DIR__ . '/schema.sql');
+
+        preg_match_all(
+            '/CREATE TABLE IF NOT EXISTS `(\w+)` \((.*?)\n\) ENGINE/s',
+            $schema,
+            $matches,
+            PREG_SET_ORDER
+        );
+
+        foreach ($matches as [, $name, $body]) {
+            preg_match_all('/^\s+`(\w+)`/m', $body, $columns);
+            $parsed[$name] = $columns[1];
+        }
+    }
+
+    return $parsed[$table] ?? [];
+}
+
+/**
+ * Render a PHP value as a MySQL literal.
+ */
+function sqlLiteral(mixed $value): string
+{
+    if ($value === null) {
+        return 'NULL';
+    }
+
+    if (is_int($value) || is_float($value)) {
+        return (string) $value;
+    }
+
+    $escaped = str_replace(
+        ['\\', "'", "\0", "\n", "\r", "\x1a"],
+        ['\\\\', "\\'", '\\0', '\\n', '\\r', '\\Z'],
+        (string) $value
+    );
+
+    return "'" . $escaped . "'";
+}
+
+if ($sqlMode) {
+    echo "-- Seed data for kishanmodhu.com\n";
+    echo "-- Generated " . date('Y-m-d H:i:s') . " by database/seed.php --sql\n";
+    echo "--\n";
+    echo "-- Import through phpMyAdmin AFTER database/schema.sql.\n";
+    echo "-- Safe to re-run: existing rows are left untouched.\n\n";
+    echo "SET NAMES utf8mb4;\n";
+    echo "START TRANSACTION;\n\n";
+} elseif ($fresh) {
     foreach ($contentTables as $table) {
         Database::execute("DELETE FROM `{$table}`");
         Database::execute("ALTER TABLE `{$table}` AUTO_INCREMENT = 1");
     }
-    echo "Cleared content tables.\n";
+    report("Cleared content tables.\n");
 }
 
 /**
@@ -45,17 +130,25 @@ if ($fresh) {
  */
 function seed(string $table, array $rows): void
 {
-    $existing = Database::selectOne("SELECT COUNT(*) AS total FROM `{$table}`");
+    global $sqlMode;
 
-    if ((int) ($existing['total'] ?? 0) > 0) {
-        echo str_pad($table, 18) . "skipped (already has rows)\n";
+    if (!$sqlMode) {
+        $existing = Database::selectOne("SELECT COUNT(*) AS total FROM `{$table}`");
 
-        return;
+        if ((int) ($existing['total'] ?? 0) > 0) {
+            report(str_pad($table, 18) . "skipped (already has rows)\n");
+
+            return;
+        }
     }
 
     // Read the real column list so a default display order is only added to
     // tables that actually have one — `settings`, for instance, does not.
-    $tableColumns = array_column(Database::select("SHOW COLUMNS FROM `{$table}`"), 'Field');
+    $tableColumns = tableColumns($table);
+
+    if ($sqlMode) {
+        echo "-- {$table} (" . count($rows) . " rows)\n";
+    }
 
     foreach ($rows as $index => $row) {
         if (in_array('sort_order', $tableColumns, true) && !array_key_exists('sort_order', $row)) {
@@ -72,6 +165,18 @@ function seed(string $table, array $rows): void
             ));
         }
 
+        if ($sqlMode) {
+            // An explicit primary key plus INSERT IGNORE makes re-importing a
+            // no-op rather than a source of duplicate rows.
+            $row        = ['id' => $index + 1] + $row;
+            $columnList = '`' . implode('`, `', array_keys($row)) . '`';
+            $values     = implode(', ', array_map('sqlLiteral', array_values($row)));
+
+            echo "INSERT IGNORE INTO `{$table}` ({$columnList}) VALUES ({$values});\n";
+
+            continue;
+        }
+
         $columns      = array_keys($row);
         $columnList   = '`' . implode('`, `', $columns) . '`';
         $placeholders = ':' . implode(', :', $columns);
@@ -79,7 +184,7 @@ function seed(string $table, array $rows): void
         Database::execute("INSERT INTO `{$table}` ({$columnList}) VALUES ({$placeholders})", $row);
     }
 
-    echo str_pad($table, 18) . count($rows) . " rows\n";
+    report(str_pad($table, 18) . count($rows) . " rows\n");
 }
 
 // ── Settings ────────────────────────────────────────────────────────────────
@@ -444,6 +549,10 @@ seed('social_links', [
     ],
 ]);
 
-Setting::flushCache();
-
-echo "\nSeeding complete.\n";
+if ($sqlMode) {
+    echo "\nCOMMIT;\n";
+    report("\nSQL written to stdout. Import it through phpMyAdmin after schema.sql.\n");
+} else {
+    Setting::flushCache();
+    report("\nSeeding complete.\n");
+}

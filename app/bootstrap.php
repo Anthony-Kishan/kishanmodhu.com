@@ -8,9 +8,10 @@ use App\Core\Session;
 use App\Core\View;
 
 /**
- * Application bootstrap: autoloading, environment, error handling, shared state.
+ * Application bootstrap: autoloading, error handling, environment, session.
  *
- * Returns nothing; the front controller takes over once this file completes.
+ * Error handling is installed *before* anything that can fail, so a missing or
+ * misplaced .env produces a logged, readable message rather than a blank 500.
  */
 
 $root = dirname(__DIR__);
@@ -31,23 +32,35 @@ spl_autoload_register(static function (string $class) use ($root): void {
 
 require_once $root . '/app/helpers.php';
 
-// ── Environment & configuration ──────────────────────────────────────────────
-Env::load($root . '/.env');
-Config::setPath($root . '/config');
-View::setPath($root . '/app/Views');
-
-date_default_timezone_set((string) Config::get('app.timezone', 'UTC'));
-
 // ── Error handling ───────────────────────────────────────────────────────────
-$debug = (bool) Config::get('app.debug', false);
+// Installed first, with a log path derived from the filesystem rather than
+// config, so failures during configuration loading are still recorded.
+$logDirectory = $root . '/storage/logs';
+
+if (!is_dir($logDirectory)) {
+    @mkdir($logDirectory, 0755, true);
+}
 
 error_reporting(E_ALL);
-ini_set('display_errors', $debug ? '1' : '0');
 ini_set('log_errors', '1');
-ini_set('error_log', Config::get('app.log_path') . '/php-error.log');
 
-set_exception_handler(static function (Throwable $e) use ($debug): void {
-    error_log(sprintf('[%s] %s in %s:%d', get_class($e), $e->getMessage(), $e->getFile(), $e->getLine()));
+if (is_dir($logDirectory) && is_writable($logDirectory)) {
+    ini_set('error_log', $logDirectory . '/php-error.log');
+}
+
+// Flipped to the configured value once config is available; the handler reads
+// it by reference so the early registration picks up the change.
+$debug = false;
+ini_set('display_errors', '0');
+
+set_exception_handler(static function (Throwable $e) use (&$debug): void {
+    error_log(sprintf(
+        '[%s] %s in %s:%d',
+        get_class($e),
+        $e->getMessage(),
+        $e->getFile(),
+        $e->getLine()
+    ));
 
     // CLI scripts (seeding, admin creation) get a readable message on stderr
     // rather than a page of HTML.
@@ -62,7 +75,9 @@ set_exception_handler(static function (Throwable $e) use ($debug): void {
         exit(1);
     }
 
-    http_response_code(500);
+    if (!headers_sent()) {
+        http_response_code(500);
+    }
 
     if ($debug) {
         header('Content-Type: text/plain; charset=utf-8');
@@ -71,7 +86,8 @@ set_exception_handler(static function (Throwable $e) use ($debug): void {
         return;
     }
 
-    // Fall back to plain text if even the error template cannot be rendered.
+    // Fall back to plain text if even the error template cannot be rendered —
+    // which is likely when the failure is in configuration itself.
     try {
         echo View::render('errors/500', ['pageTitle' => 'Error'], 'layouts/minimal');
     } catch (Throwable) {
@@ -79,6 +95,16 @@ set_exception_handler(static function (Throwable $e) use ($debug): void {
         echo 'Something went wrong. Please try again later.';
     }
 });
+
+// ── Environment & configuration ──────────────────────────────────────────────
+Env::load($root . '/.env');
+Config::setPath($root . '/config');
+View::setPath($root . '/app/Views');
+
+$debug = (bool) Config::get('app.debug', false);
+ini_set('display_errors', $debug ? '1' : '0');
+
+date_default_timezone_set((string) Config::get('app.timezone', 'UTC'));
 
 // ── Session ──────────────────────────────────────────────────────────────────
 Session::start();
